@@ -28,6 +28,7 @@ REC_RE = re.compile(
     r"^(daily|weekly:(mon|tue|wed|thu|fri|sat|sun)|monthly:([1-9]|[12]\d|3[01])|every:[1-9]\d*:days)$"
 )
 STATUS_ICON = {"todo": "○", "in_progress": "●", "blocked": "◼", "done": "✓", "cancelled": "✗"}
+DAY_CUTOFF_HOUR = 4  # 凌晨 4 点前算前一天（逻辑日）
 
 
 class TodoError(Exception):
@@ -36,8 +37,30 @@ class TodoError(Exception):
 
 # ---------------------------------------------------------------- 基础设施
 
+def current_now():
+    """当前本地时间。$TODO_MANAGER_NOW (ISO 8601) 可冻结时间，仅供测试/调试。"""
+    raw = os.environ.get("TODO_MANAGER_NOW")
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            return dt if dt.tzinfo else dt.astimezone()
+        except ValueError:
+            pass  # 非法值忽略，回退真实时间
+    return datetime.now().astimezone()
+
+
+def logical_day(dt):
+    """把一个时刻映射到逻辑日：凌晨 DAY_CUTOFF_HOUR 点前算前一天。"""
+    return (dt - timedelta(hours=DAY_CUTOFF_HOUR)).date()
+
+
+def logical_today():
+    """当前逻辑日（按 DAY_CUTOFF_HOUR 日界线）。"""
+    return logical_day(current_now())
+
+
 def now_iso():
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return current_now().isoformat(timespec="seconds")
 
 
 def parse_date(s, field="due"):
@@ -219,7 +242,7 @@ def validate_recurrence(r):
 
 
 def next_due(rule, from_date):
-    """下一期截止日，从完成日推算，严格晚于 from_date。"""
+    """按规则推算下一期截止日，严格晚于 from_date。"""
     if rule == "daily":
         return from_date + timedelta(days=1)
     if rule.startswith("weekly:"):
@@ -259,6 +282,10 @@ def finalize_done(db, t, txn, lines, entries):
 
     spawned = None
     if rule:
+        anchor = parse_date(t["due"]) if t.get("due") else logical_today()
+        nd = next_due(rule, anchor)
+        while nd <= logical_today():  # 拖延补做：逐期推进，保持原节拍
+            nd = next_due(rule, nd)
         nid_before = db["next_id"]
         spawned = {
             "id": db["next_id"],
@@ -266,7 +293,7 @@ def finalize_done(db, t, txn, lines, entries):
             "notes": t.get("notes", ""),
             "status": "todo",
             "priority": t["priority"],
-            "due": next_due(rule, date.today()).isoformat(),
+            "due": nd.isoformat(),
             "progress": 0,
             "tags": list(t.get("tags", [])),
             "estimate_minutes": t.get("estimate_minutes"),
@@ -297,7 +324,7 @@ def fmt_due(due_str):
     if not due_str:
         return ""
     d = parse_date(due_str)
-    delta = (d - date.today()).days
+    delta = (d - logical_today()).days
     if delta < 0:
         return f"过期 {-delta} 天"
     if delta == 0:
@@ -315,7 +342,7 @@ def fmt_estimate(minutes):
 
 
 def is_overdue(t):
-    return bool(t.get("due")) and parse_date(t["due"]) < date.today() \
+    return bool(t.get("due")) and parse_date(t["due"]) < logical_today() \
         and t["status"] not in ("done", "cancelled")
 
 
@@ -422,27 +449,29 @@ def cmd_add(ns, data_dir):
     return {"task": t}, lines
 
 
-def pick_view(db, view):
+def pick_view(db, view, include_all=False):
     tasks = db["tasks"]
     active = [t for t in tasks if t["status"] not in ("done", "cancelled")]
     if view == "today":
         return [t for t in active
                 if is_overdue(t)
-                or (t.get("due") and parse_date(t["due"]) == date.today())
+                or (t.get("due") and parse_date(t["due"]) == logical_today())
                 or t["status"] == "in_progress"]
     if view == "week":
-        week_end = date.today() + timedelta(days=6 - date.today().weekday())
+        today = logical_today()
+        week_end = today + timedelta(days=6 - today.weekday())
         return [t for t in active
                 if (t.get("due") and parse_date(t["due"]) <= week_end)
                 or (not t.get("due") and t["priority"] in ("P0", "P1"))]
     if view == "blocked":
         return [t for t in active if t["status"] == "blocked"]
-    return list(tasks)
+    return list(tasks) if include_all else list(active)
 
 
 def cmd_list(ns, data_dir):
     db = load_db(data_dir)
-    sel = pick_view(db, ns.view)
+    include_all = ns.include_done or ns.status in ("done", "cancelled")
+    sel = pick_view(db, ns.view, include_all)
     if ns.status:
         if ns.status not in TASK_STATUSES:
             raise TodoError(f"--status 必须是 {'/'.join(TASK_STATUSES)} 之一")
@@ -456,7 +485,7 @@ def cmd_list(ns, data_dir):
     pending = [t for t in sel if t["status"] not in ("done", "cancelled")]
     overdue_n = sum(1 for t in sel if is_overdue(t))
     header = {"today": "今天", "week": "本周", "blocked": "阻塞中", "all": "全部"}[ns.view]
-    lines = [f"📋 {header} ({date.today().isoformat()}) · {len(pending)} 项待办"
+    lines = [f"📋 {header} ({logical_today().isoformat()}) · {len(pending)} 项待办"
              + (f"，{overdue_n} 项过期" if overdue_n else "")]
     lines.append("─" * 38)
     lines += [render_line(t) for t in sel] or ["(没有匹配的任务)"]
@@ -657,12 +686,13 @@ def cmd_report(ns, data_dir):
     db = load_db(data_dir)
     tasks = db["tasks"]
     active = [t for t in tasks if t["status"] not in ("done", "cancelled")]
-    week_start = date.today() - timedelta(days=date.today().weekday())
+    week_start = logical_today() - timedelta(days=logical_today().weekday())
 
     def completed_this_week(t):
         if not t.get("completed_at"):
             return False
-        return week_start <= datetime.fromisoformat(t["completed_at"]).date() <= date.today()
+        d = logical_day(datetime.fromisoformat(t["completed_at"]))
+        return week_start <= d <= logical_today()
 
     done_week = [t for t in tasks if completed_this_week(t)]
     for f in sorted((data_dir / "archive").glob("*.json")):
@@ -674,7 +704,7 @@ def cmd_report(ns, data_dir):
     overdue = [t for t in active if is_overdue(t)]
     est = sum(t.get("estimate_minutes") or 0 for t in active)
 
-    lines = [f"📈 报告 ({date.today().isoformat()}，本周从 {week_start.isoformat()} 起)",
+    lines = [f"📈 报告 ({logical_today().isoformat()}，本周从 {week_start.isoformat()} 起)",
              "─" * 38,
              f"本周完成: {len(done_week)} 项"]
     lines += [f"  ✓ {t['title']}" for t in done_week]
@@ -795,6 +825,8 @@ def build_parser():
     l.add_argument("--status")
     l.add_argument("--tag")
     l.add_argument("--overdue", action="store_true")
+    l.add_argument("--include-done", action="store_true",
+                   help="all 视图包含已完成/已取消任务")
     l.set_defaults(fn=cmd_list)
 
     s = sub.add_parser("show", parents=[common], help="任务详情")

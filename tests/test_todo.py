@@ -12,32 +12,41 @@ SCRIPT = Path(__file__).resolve().parents[1] / "todo-manager" / "scripts" / "tod
 TODAY = date.today()
 
 
-def run(tmp, *args):
+def run(tmp, *args, now=None):
     env = dict(os.environ)
     env.pop("TODO_MANAGER_HOME", None)
+    env["TODO_MANAGER_NOW"] = now or f"{TODAY.isoformat()}T12:00:00"
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--data-dir", str(tmp)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
 
-def ok(tmp, *args):
-    r = run(tmp, *args)
+def ok(tmp, *args, now=None):
+    r = run(tmp, *args, now=now)
     assert r.returncode == 0, f"命令失败: {args}\nstderr: {r.stderr}"
     return r
 
 
-def fail(tmp, *args):
-    r = run(tmp, *args)
+def fail(tmp, *args, now=None):
+    r = run(tmp, *args, now=now)
     assert r.returncode != 0, f"预期失败但成功了: {args}\nstdout: {r.stdout}"
     return r
 
 
-def runj(tmp, *args):
-    return json.loads(ok(tmp, *args, "--json").stdout)
+def runj(tmp, *args, now=None):
+    return json.loads(ok(tmp, *args, "--json", now=now).stdout)
 
 
 def read_db(tmp):
     return json.loads((Path(tmp) / "todos.json").read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------- 时间源
+
+def test_frozen_time_source(tmp_path):
+    ok(tmp_path, "add", "冻结时间", now="2026-03-01T10:00:00")
+    t = read_db(tmp_path)["tasks"][0]
+    assert t["created_at"].startswith("2026-03-01T10:00:00")
 
 
 # ---------------------------------------------------------------- add
@@ -99,6 +108,21 @@ def test_list_sorting_overdue_first(tmp_path):
     seed_views(tmp_path)
     tasks = runj(tmp_path, "list", "--view", "today")["tasks"]
     assert tasks[0]["id"] == 1  # 过期的排最前
+
+
+def test_list_all_excludes_done_by_default(tmp_path):
+    ok(tmp_path, "add", "做完的")
+    ok(tmp_path, "add", "还没做")
+    ok(tmp_path, "done", "1")
+    assert [t["id"] for t in runj(tmp_path, "list")["tasks"]] == [2]
+    ids = {t["id"] for t in runj(tmp_path, "list", "--include-done")["tasks"]}
+    assert ids == {1, 2}
+
+
+def test_list_status_done_auto_includes(tmp_path):
+    ok(tmp_path, "add", "做完的")
+    ok(tmp_path, "done", "1")
+    assert [t["id"] for t in runj(tmp_path, "list", "--status", "done")["tasks"]] == [1]
 
 
 # ---------------------------------------------------------------- done 与进度
@@ -231,6 +255,31 @@ def test_recurrence_every_n_days(tmp_path):
     assert new["due"] == (TODAY + timedelta(days=3)).isoformat()
 
 
+def test_recurrence_early_completion_keeps_anchor(tmp_path):
+    sat = "2026-07-11T15:00:00"
+    ok(tmp_path, "add", "周日回顾", "--recurrence", "weekly:sun",
+       "--due", "2026-07-12", now=sat)
+    ok(tmp_path, "done", "1", now=sat)  # 周六提前完成周日截止的任务
+    new = next(t for t in read_db(tmp_path)["tasks"] if t["id"] == 2)
+    assert new["due"] == "2026-07-19"  # 下一期仍是下周日，而不是"明天"
+
+
+def test_recurrence_late_completion_rolls_forward(tmp_path):
+    ok(tmp_path, "add", "浇花", "--recurrence", "every:3:days",
+       "--due", "2026-07-01", now="2026-07-01T09:00:00")
+    ok(tmp_path, "done", "1", now="2026-07-12T15:00:00")  # 拖到 7/12 才完成
+    new = next(t for t in read_db(tmp_path)["tasks"] if t["id"] == 2)
+    assert new["due"] == "2026-07-13"  # 保持 4/7/10/13 节拍，且不生成即过期
+
+
+def test_recurrence_no_due_falls_back_to_completion_day(tmp_path):
+    sat = "2026-07-11T15:00:00"
+    ok(tmp_path, "add", "无日期周报", "--recurrence", "weekly:mon", now=sat)
+    ok(tmp_path, "done", "1", now=sat)
+    new = next(t for t in read_db(tmp_path)["tasks"] if t["id"] == 2)
+    assert new["due"] == "2026-07-13"  # 从完成日（周六）推算下一个周一
+
+
 # ---------------------------------------------------------------- undo
 
 def test_undo_add_restores_next_id(tmp_path):
@@ -330,3 +379,34 @@ def test_failed_write_leaves_db_untouched(tmp_path):
     before = (tmp_path / "todos.json").read_text(encoding="utf-8")
     fail(tmp_path, "update", "1", "--priority", "P9")
     assert (tmp_path / "todos.json").read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------- 逻辑日（4 点日界线）
+
+def test_logical_day_before_cutoff(tmp_path):
+    ok(tmp_path, "add", "今晚到期", "--due", "2026-09-10")
+    at = "2026-09-11T02:30:00"  # 次日凌晨 2:30，逻辑日仍是 09-10
+    tasks = runj(tmp_path, "list", "--view", "today", now=at)["tasks"]
+    assert [t["id"] for t in tasks] == [1]  # 仍算"今日到期"，且未过期
+    r = ok(tmp_path, "show", "1", now=at)
+    assert "今天" in r.stdout and "过期" not in r.stdout
+
+
+def test_logical_day_at_cutoff(tmp_path):
+    ok(tmp_path, "add", "今晚到期", "--due", "2026-09-10")
+    r = ok(tmp_path, "show", "1", now="2026-09-11T04:00:00")  # 4 点整，新的一天
+    assert "过期 1 天" in r.stdout
+
+
+def test_logical_day_tomorrow_rendering(tmp_path):
+    ok(tmp_path, "add", "明天到期", "--due", "2026-09-11")
+    r = ok(tmp_path, "show", "1", now="2026-09-11T01:00:00")  # 凌晨 1 点
+    assert "明天" in r.stdout  # "明天" = 09-11 当前自然日，而非 09-12
+
+
+def test_report_counts_late_night_completion(tmp_path):
+    mon_1am = "2026-07-13T01:00:00"  # 周一凌晨 1 点 = 逻辑日周日 07-12
+    ok(tmp_path, "add", "深夜完成", now="2026-07-12T20:00:00")
+    ok(tmp_path, "done", "1", now=mon_1am)
+    rep = runj(tmp_path, "report", now=mon_1am)
+    assert len(rep["completed_this_week"]) == 1  # 算进 07-06 起的那一周

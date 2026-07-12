@@ -75,9 +75,11 @@
 - `monthly:1..31` — 每月某日；日期超出当月天数时取月末
 - `every:N:days` — 每 N 天
 
-行为：循环任务完成时，写入端自动生成下一期任务——新 id，`due` 从**完成日**推算（严格晚于完成日），
-继承 title/notes/priority/tags/estimate，子任务全部重置为 todo（新 id），`recurrence` 移到新任务上，
-原任务的清空。原任务保持 done 留在 todos.json，等 `archive` 时归档。
+行为：循环任务完成时，写入端自动生成下一期任务——新 id，`due` 以**原任务的 due 为锚点**
+按规则推算（原任务无 due 时从完成日的逻辑日推算）；结果不晚于完成日（逻辑日）时逐期推进，
+保证严格晚于完成日且保持原节拍。继承 title/notes/priority/tags/estimate，子任务全部重置为
+todo（新 id），`recurrence` 移到新任务上，原任务的清空。原任务保持 done 留在 todos.json，
+等 `archive` 时归档。
 
 ## archive/<YYYY>.json
 
@@ -108,6 +110,13 @@
 ```json
 { "schema_version": 1, "default_priority": "P2" }
 ```
+
+## 日期口径（逻辑日）
+
+CLI 的"今天 / 过期 / 本周"判断使用**逻辑日**：凌晨 0:00–3:59 属于前一天，4:00 起算新一天
+（`DAY_CUTOFF_HOUR = 4`）。数据中的时间戳仍是真实时间；UI 若要与 CLI 判断一致（如高亮
+"今天到期"），应采用同一口径。环境变量 `TODO_MANAGER_NOW`（ISO 8601）可冻结 CLI 的
+"当前时间"，仅供测试。
 
 ## UI 对接建议
 
