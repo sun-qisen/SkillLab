@@ -124,3 +124,4 @@ CLI 的"今天 / 过期 / 本周"判断使用**逻辑日**：凌晨 0:00–3:59 
 - 写入：复用 `scripts/todo.py`（子进程调用，`--json` 拿结构化结果），与 Agent 共享同一套
   校验、文件锁（`todos.json.lock`）与 journal，避免两套写入逻辑分叉。
 - 监听变化：watch `todos.json` 的 mtime 即可（原子替换写入，不会读到半截文件）。
+- HTTP 对接：`scripts/serve.py` 提供现成的 HTTP API（含认证与 CORS），契约见 `api.md`——自行开发前端时优先走 API，不必直读文件。

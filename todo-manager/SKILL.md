@@ -126,6 +126,45 @@ todo.py undo                  # 撤销上一次写操作（推断错了、误操
 1. `todo.py add "交周报" --recurrence weekly:mon --due <下周一> --priority P1 --inferred priority`
 2. 完成后脚本会自动生成下一期，无需用户重复添加。
 
+## 可视化（网页查看与管理）
+
+用户说「要可视化 / 网页看任务 / 手机上看」时，启动本技能自带的参考服务
+`scripts/serve.py`（零依赖，`python <skill_dir>/scripts/serve.py` 即可运行），按下面的决策树执行，
+一次只问一个问题。HTTP 契约见 `references/api.md`。
+
+**第 1 问——在哪访问？**
+
+- **(a) 就在这台机器的浏览器**：`python <skill_dir>/scripts/serve.py` →
+  交付 `http://127.0.0.1:3007`。无需密码。
+- **(b) 数据在远程机器、人在本地浏览器**：远程机器上照 (a) 启动，交付隧道命令
+  `ssh -L 3007:127.0.0.1:3007 用户@远程机器` + 本地链接 `http://127.0.0.1:3007`。无需密码。
+- **(c) 手机或其他设备**：走「设备访问」流程 ↓。
+- **(d) 对接用户自建的前端**：走 `references/api.md` 的「自建前端对接」执行清单
+  （核心：拿到前端地址——用户没说就主动问；`--cors-origin <地址>` 重启；两条 curl 自检）。
+
+**设备访问流程（必须有密码）**：
+
+1. 请用户设一个访问密码，然后执行（密码经 stdin 传入，不进命令行历史）：
+   `echo 密码 | python <skill_dir>/scripts/serve.py auth set --password-stdin`
+2. 按环境启动：
+   - 云服务器 + 已有反向代理和证书：`python <skill_dir>/scripts/serve.py`（保持 127.0.0.1），
+     在反代上加一段转发到 3007 的配置并重载；
+   - 云服务器裸环境：`python <skill_dir>/scripts/serve.py --host 0.0.0.0`，如实告知链接是
+     http 无加密、建议日后加反代；安全组需放行端口（Agent 无云商权限时提示用户
+     在控制台开一次）；
+   - 家用电脑：`python <skill_dir>/scripts/serve.py --host 0.0.0.0`，交付局域网地址
+     `http://<内网IP>:3007`，说明仅同 Wi-Fi 可用；用户要外网访问则需内网穿透
+     （Tailscale/frp 等），属于另行处理的事项。
+3. **自检后才交付链接**：
+   `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3007/api/tasks` 应为 401；
+   `curl -s -o /dev/null -w "%{http_code}" -u admin:密码 同URL` 应为 200。
+4. 常驻（云服务器）：用 systemd 或环境等价物让服务自启、自拉起。
+
+**密码维护**：用户忘了或想换 → 直接重跑 `auth set`（旧会话全部立即失效），没有
+找回流程。用户不想要密码了（回到仅本机）→ `python <skill_dir>/scripts/serve.py auth unset`。
+
+**边界**：undo / archive 等维护操作不在页面里，用户在对话里说即可（走 CLI）。
+
 ## 错误与恢复
 
 - 脚本报"找不到任务"时会列出最近的活跃任务——对照后和用户确认，不要对错误的 ID 强行操作。
