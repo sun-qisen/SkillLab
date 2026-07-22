@@ -340,6 +340,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self.handle_one("PATCH")
 
+    def do_DELETE(self):
+        self.handle_one("DELETE")
+
     def do_OPTIONS(self):
         # 跨域预检免认证放行（设计文档 §3）；非白名单来源不给任何 CORS 头
         headers = self.cors_headers()
@@ -347,7 +350,7 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in headers:
             self.send_header(k, v)
         if headers:
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
             self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
@@ -462,6 +465,9 @@ class Handler(BaseHTTPRequestHandler):
             args += ["--due", str(b["due"])]
         self.send_json(200, run_todo(self.server.data_dir, args))
 
+    def h_subtask_delete(self, id):
+        self.send_json(200, run_todo(self.server.data_dir, ["subtask", "delete", id]))
+
     def h_login(self):
         if not auth_section(self.cfg):
             raise ApiError(400, "auth_not_configured", "服务未设置密码，无需登录")
@@ -497,6 +503,7 @@ ROUTES = [
     ("PATCH", re.compile(r"^/api/tasks/(?P<id>\d+(?:\.\d+)?)$"), "h_update", True),
     ("POST", re.compile(r"^/api/tasks/(?P<id>\d+(?:\.\d+)?)/done$"), "h_done", True),
     ("POST", re.compile(r"^/api/tasks/(?P<id>\d+)/subtasks$"), "h_subtask_add", True),
+    ("DELETE", re.compile(r"^/api/tasks/(?P<id>\d+\.\d+)$"), "h_subtask_delete", True),
     ("POST", re.compile(r"^/api/auth/login$"), "h_login", False),
     ("POST", re.compile(r"^/api/auth/logout$"), "h_logout", True),
 ]

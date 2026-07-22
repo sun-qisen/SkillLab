@@ -270,6 +270,34 @@ def test_add_subtask(server):
     assert data["subtask"]["id"] == "1.1" and data["subtask"]["due"] == "2026-07-15"
 
 
+def test_delete_subtask(server):
+    server.req("POST", "/api/tasks", body={"title": "父", "subtasks": ["子1", "子2"]})
+    status, data, _ = server.req("DELETE", "/api/tasks/1.1")
+    assert status == 200 and data["deleted"] == "1.1"
+    status, data, _ = server.req("GET", "/api/tasks/1")
+    assert [st["id"] for st in data["task"]["subtasks"]] == ["1.2"]
+
+
+def test_delete_subtask_missing_404(server):
+    server.req("POST", "/api/tasks", body={"title": "父", "subtasks": ["子1"]})
+    status, data, _ = server.req("DELETE", "/api/tasks/1.9")
+    assert status == 404 and data["error"]["code"] == "task_not_found"
+
+
+def test_delete_top_level_task_405(server):
+    """DELETE 只针对子任务；顶层任务 id 不匹配 DELETE 路由 → 405。"""
+    server.req("POST", "/api/tasks", body={"title": "父"})
+    status, data, _ = server.req("DELETE", "/api/tasks/1")
+    assert status == 405 and data["error"]["code"] == "method_not_allowed"
+
+
+def test_preflight_allows_delete(cors_server):
+    _, _, headers = cors_server.req_raw(
+        "OPTIONS", "/api/tasks/1.1", headers={"Origin": "https://todo.example.com",
+                                              "Access-Control-Request-Method": "DELETE"})
+    assert "DELETE" in headers["Access-Control-Allow-Methods"]
+
+
 def test_write_invalidates_cache(server):
     _, d1, _ = server.req("GET", "/api/tasks?view=all")
     assert d1["count"] == 0

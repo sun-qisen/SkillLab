@@ -255,6 +255,10 @@ form.grid input:focus,form.grid select:focus,form.grid textarea:focus{outline:2p
 .subedit .srow button{flex:none;width:2.1rem;border:1px solid var(--line);border-radius:var(--r2);
   background:var(--card2);color:var(--mut);font-size:1.1rem;line-height:1}
 .subedit .srow button:hover{color:var(--p0);border-color:var(--p0)}
+.subedit .srow .sx{flex:1;min-width:0;padding:.5rem .6rem;border:1px solid var(--line);border-radius:var(--r2);
+  background:var(--card2);color:var(--ink);overflow-wrap:anywhere}
+.subedit .srow.pending-del .sx{color:var(--mut);text-decoration:line-through;text-decoration-color:var(--p0)}
+.subedit .srow.pending-del button{color:var(--p0);border-color:var(--p0)}
 .subadd{justify-self:start;background:none;border:1px dashed var(--line);border-radius:var(--r2);
   color:var(--mut);padding:.35rem .7rem;font-size:.82rem}
 .subadd:hover{color:var(--go);border-color:var(--go)}
@@ -362,6 +366,7 @@ form.grid input:focus,form.grid select:focus,form.grid textarea:focus{outline:2p
   <label>预估分钟<input name="estimate" type="number" min="1"></label>
   <label>进度 %（有子任务时自动计算，不可编辑）<input name="progress" type="number" min="0" max="100"></label>
   <label>备注<textarea name="notes" rows="2"></textarea></label>
+  <label id="subExistWrap" hidden>现有子任务（× 标记删除，保存生效）<div class="subedit" id="subExisting"></div></label>
   <label>新增子任务（保存时一并提交）<div class="subedit" id="subRowsEdit"></div></label>
   <button type="button" class="subadd" id="subAddEdit">＋ 添加子任务</button>
   <div class="actions"><button type="button" class="ghost" data-close>取消</button>
@@ -711,6 +716,14 @@ function subRow(val=''){const d=document.createElement('div');d.className='srow'
   d.querySelector('button').onclick=()=>d.remove();return d}
 function resetSubRows(c){c.innerHTML='';c.appendChild(subRow())}
 function collectSubs(c){return [...c.querySelectorAll('input')].map(i=>i.value.trim()).filter(Boolean)}
+let SUBDEL=new Set();  // 编辑弹窗里被标记删除的现有子任务 id，保存时统一提交
+function existingSubRow(st){const d=document.createElement('div');d.className='srow exist';
+  d.innerHTML=`<span class="sx"></span><button type="button" title="删除">×</button>`;
+  d.querySelector('.sx').textContent=st.title;
+  d.querySelector('button').onclick=()=>{
+    SUBDEL.has(st.id)?SUBDEL.delete(st.id):SUBDEL.add(st.id);
+    d.classList.toggle('pending-del',SUBDEL.has(st.id))};
+  return d}
 $('#subAdd').onclick=()=>{const c=$('#subRows');c.appendChild(subRow());c.lastChild.querySelector('input').focus()};
 $('#subAddEdit').onclick=()=>{const c=$('#subRowsEdit');c.appendChild(subRow());c.lastChild.querySelector('input').focus()};
 
@@ -751,6 +764,10 @@ async function openEdit(id){
   f.elements.notes.value=EDITING.notes||'';
   $('#reasonRow').hidden=EDITING.status!=='blocked';
   $('#subRowsEdit').innerHTML='';
+  SUBDEL=new Set();
+  const ex=$('#subExisting');ex.innerHTML='';
+  (EDITING.subtasks||[]).forEach(st=>ex.appendChild(existingSubRow(st)));
+  $('#subExistWrap').hidden=!(EDITING.subtasks||[]).length;
   $('#dlgEdit').showModal();
 }
 $('#dlgEdit [name=status]').addEventListener('change',
@@ -775,6 +792,8 @@ $('#dlgEdit form').addEventListener('submit',async e=>{
   if(f.get('notes')!==(t.notes||''))b.notes=f.get('notes');
   try{
     if(Object.keys(b).length)await api('/api/tasks/'+t.id,{method:'PATCH',body:JSON.stringify(b)});
+    for(const sid of SUBDEL)
+      await api('/api/tasks/'+sid,{method:'DELETE'});
     for(const s of collectSubs($('#subRowsEdit')))
       await api(`/api/tasks/${t.id}/subtasks`,{method:'POST',body:JSON.stringify({title:s})});
     $('#dlgEdit').close();toast('已保存');await refresh();

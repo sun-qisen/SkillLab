@@ -694,12 +694,22 @@ def cmd_done(ns, data_dir):
 
 
 def cmd_subtask(ns, data_dir):
-    if ns.subcmd != "add":
-        raise TodoError("subtask 目前仅支持 add 子命令")
     txn = uuid.uuid4().hex[:8]
     with Lock(data_dir):
         db = load_db(data_dir)
         t, st = get_task_or_die(db, ns.id)
+        if ns.subcmd == "delete":
+            if st is None:
+                raise TodoError(f"{ns.id!r} 不是子任务 ID（应为 12.1 的形式）")
+            before = snapshot(t)
+            t["subtasks"] = [s for s in t.get("subtasks", []) if s["id"] != st["id"]]
+            recompute_progress(t)
+            t["updated_at"] = now_iso()
+            b, a = diff(before, t)
+            save_db(data_dir, db)
+            journal_append(data_dir, [journal_entry(txn, "subtask_delete", t["id"], b, a)])
+            return {"task": t, "deleted": st["id"]}, \
+                [f"已删除子任务 {st['id']}「{st['title']}」，#{t['id']} 当前进度 {t['progress']}%"]
         if st is not None:
             raise TodoError("不能给子任务再添加子任务（仅支持两层结构）")
         if ns.due:
@@ -830,7 +840,7 @@ def cmd_undo(ns, data_dir):
                 if e.get("next_id_before") is not None:
                     db["next_id"] = e["next_id_before"]
                 lines.append(f"↩ 已移除任务 #{e['task_id']}")
-            elif op in ("update", "done", "subtask_add"):
+            elif op in ("update", "done", "subtask_add", "subtask_delete"):
                 t = find_task(db, e["task_id"])
                 if t is None:
                     raise TodoError(f"撤销失败：任务 #{e['task_id']} 已不在活跃列表（可能已归档）")
@@ -910,11 +920,14 @@ def build_parser():
     d.add_argument("id")
     d.set_defaults(fn=cmd_done)
 
-    st = sub.add_parser("subtask", parents=[common], help="子任务操作")
-    st.add_argument("subcmd", choices=["add"])
-    st.add_argument("id", help="父任务 ID")
-    st.add_argument("title")
-    st.add_argument("--due")
+    st = sub.add_parser("subtask", help="子任务操作")
+    st_sub = st.add_subparsers(dest="subcmd", required=True)
+    st_add = st_sub.add_parser("add", parents=[common], help="添加子任务")
+    st_add.add_argument("id", help="父任务 ID")
+    st_add.add_argument("title")
+    st_add.add_argument("--due")
+    st_del = st_sub.add_parser("delete", parents=[common], help="删除子任务")
+    st_del.add_argument("id", help="子任务 ID，如 12.1")
     st.set_defaults(fn=cmd_subtask)
 
     se = sub.add_parser("search", parents=[common], help="全文搜索（含归档）")

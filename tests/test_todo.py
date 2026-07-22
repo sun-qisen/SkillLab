@@ -212,6 +212,34 @@ def test_subtask_add_and_two_level_limit(tmp_path):
     assert "两层" in fail(tmp_path, "subtask", "add", "1.1", "孙任务").stderr
 
 
+def test_subtask_delete_removes_and_recomputes(tmp_path):
+    ok(tmp_path, "add", "任务", "--subtask", "a", "--subtask", "b")
+    ok(tmp_path, "done", "1.1")            # 进度 50%
+    d = runj(tmp_path, "subtask", "delete", "1.1")
+    assert d["deleted"] == "1.1"
+    t = d["task"]
+    assert [s["id"] for s in t["subtasks"]] == ["1.2"]  # 仅删掉指定子任务
+    assert t["progress"] == 0             # 剩下的 b 未完成，重算为 0
+
+
+def test_subtask_delete_rejects_parent_id(tmp_path):
+    ok(tmp_path, "add", "任务", "--subtask", "a")
+    assert "不是子任务 ID" in fail(tmp_path, "subtask", "delete", "1").stderr
+
+
+def test_subtask_delete_missing_subtask(tmp_path):
+    ok(tmp_path, "add", "任务", "--subtask", "a")
+    assert "找不到任务" in fail(tmp_path, "subtask", "delete", "1.9").stderr
+
+
+def test_subtask_delete_undo_restores(tmp_path):
+    ok(tmp_path, "add", "任务", "--subtask", "a", "--subtask", "b")
+    ok(tmp_path, "subtask", "delete", "1.1")
+    ok(tmp_path, "undo")
+    t = runj(tmp_path, "show", "1")["task"]
+    assert [s["id"] for s in t["subtasks"]] == ["1.1", "1.2"]  # 撤销恢复
+
+
 def test_id_not_found_lists_candidates(tmp_path):
     ok(tmp_path, "add", "唯一的任务")
     r = fail(tmp_path, "done", "99")
