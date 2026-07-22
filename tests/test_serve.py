@@ -20,6 +20,9 @@ SERVE = SCRIPTS / "serve.py"
 TODO = SCRIPTS / "todo.py"
 ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
 
+sys.path.insert(0, str(SCRIPTS))  # 允许在测试进程内直接 import serve/todo
+import serve  # noqa: E402
+
 
 def free_port():
     s = socket.socket()
@@ -597,3 +600,31 @@ def test_login_non_string_password_400(auth_server):
     s, _ = auth_server
     status, _, _ = s.req("POST", "/api/auth/login", body={"password": 123})
     assert status == 400
+
+
+# ---------------------------------------------------------------- 进程内化
+
+def test_run_todo_runs_in_process(monkeypatch, tmp_path):
+    """run_todo 必须进程内调用 todo，不再 fork 子进程。"""
+    import subprocess as sp
+    def boom(*a, **k):
+        raise AssertionError("run_todo 不应 fork 子进程，应进程内调用 todo")
+    monkeypatch.setattr(sp, "run", boom)
+    result = serve.run_todo(tmp_path / "d", ["add", "进程内任务"])
+    assert result["task"]["title"] == "进程内任务"
+
+
+def test_run_todo_maps_missing_to_apierror(tmp_path):
+    """业务错误经进程内异常正确映射为 ApiError（找不到任务 → 404）。"""
+    serve.run_todo(tmp_path / "d", ["add", "x"])
+    with pytest.raises(serve.ApiError) as ei:
+        serve.run_todo(tmp_path / "d", ["show", "999"])
+    assert ei.value.status == 404 and ei.value.code == "task_not_found"
+
+
+def test_bad_view_param_keeps_server_alive(server):
+    """非法 view 触发 argparse SystemExit，必须被拦为错误响应且服务不死。"""
+    status, _, _ = server.req("GET", "/api/tasks?view=nonsense")
+    assert status >= 400
+    status, data, _ = server.req("GET", "/api/tasks?view=all")  # 服务仍存活
+    assert status == 200 and "tasks" in data

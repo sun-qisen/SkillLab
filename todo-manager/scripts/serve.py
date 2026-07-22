@@ -19,7 +19,6 @@ import json
 import os
 import re
 import secrets
-import subprocess
 import sys
 import threading
 import time
@@ -28,10 +27,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import todo
+
 VERSION = "1.0"
 CONTRACT_VERSION = 1
 SCRIPT_DIR = Path(__file__).resolve().parent
-TODO_PY = SCRIPT_DIR / "todo.py"
 WEBUI = SCRIPT_DIR / "webui.html"
 
 
@@ -49,27 +49,31 @@ def logical_today_str():
 
 
 def run_todo(data_dir, cli_args):
-    """调 todo.py 子进程；成功返回其 --json 输出，失败按 stderr 分类抛 ApiError。"""
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    proc = subprocess.run(
-        [sys.executable, str(TODO_PY), *cli_args, "--json", "--data-dir", str(data_dir)],
-        capture_output=True, text=True, encoding="utf-8", env=env)
-    if proc.returncode == 0:
-        return json.loads(proc.stdout)
-    raw = (proc.stderr or "").strip()
-    if raw.startswith("错误: "):
-        msg = raw[len("错误: "):]
+    """进程内调用 todo：复用其 argparse 定义与 cmd_* 函数，返回结构化结果 dict。
+
+    复用 todo.py 这一唯一数据读写路径（同一把文件锁、journal、校验），只是不再 fork
+    子进程。错误分类与原子进程实现等价；argparse 失败与非预期异常一律降级为 500。
+    """
+    try:
+        ns = todo.build_parser().parse_args([*cli_args, "--data-dir", str(data_dir)])
+        result, _lines = ns.fn(ns, todo.resolve_data_dir(ns.data_dir))
+        return result
+    except todo.TodoError as e:
+        msg = str(e)
         if "找不到任务" in msg:
             raise ApiError(404, "task_not_found", msg)
         if "获取写锁超时" in msg:
             raise ApiError(409, "locked", msg)
-        # 解析失败、Traceback 等非预期错误 → 500；业务验证错误 → 400
-        if any(x in raw for x in ("解析失败", "Traceback", "异常")):
-            print(f"todo.py 异常退出({proc.returncode}): {raw}", flush=True)
-            raise ApiError(500, "internal", "服务内部错误：todo.py 执行失败，详情见服务日志")
-        raise ApiError(400, "invalid_request", msg)
-    print(f"todo.py 异常退出({proc.returncode}): {raw}", flush=True)
-    raise ApiError(500, "internal", "服务内部错误：todo.py 执行失败，详情见服务日志")
+        if "解析失败" in msg:  # todos.json 损坏属数据/内部错误，不回显原文
+            print(f"todo 数据异常: {msg}", flush=True)
+            raise ApiError(500, "internal", "服务内部错误，详情见服务日志")
+        raise ApiError(400, "invalid_request", msg)  # 其余为业务校验错误
+    except SystemExit:  # argparse 遇非法参数会 sys.exit；进程内必须拦下，不能打死服务
+        print(f"todo 参数解析失败: {cli_args}", flush=True)
+        raise ApiError(500, "internal", "服务内部错误，详情见服务日志")
+    except Exception as e:  # 兜底：任何非预期异常都不外泄细节
+        print(f"todo 执行异常: {type(e).__name__}: {e}", flush=True)
+        raise ApiError(500, "internal", "服务内部错误，详情见服务日志")
 
 
 class ReadCache:
