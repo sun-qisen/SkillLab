@@ -710,7 +710,7 @@ function subRow(val=''){const d=document.createElement('div');d.className='srow'
   d.innerHTML=`<input placeholder="子任务…" value="${esc(val)}"><button type="button" title="删除">×</button>`;
   d.querySelector('button').onclick=()=>d.remove();return d}
 function resetSubRows(c){c.innerHTML='';c.appendChild(subRow())}
-function collectSubs(c){return $$('input',c).map(i=>i.value.trim()).filter(Boolean)}
+function collectSubs(c){return [...c.querySelectorAll('input')].map(i=>i.value.trim()).filter(Boolean)}
 $('#subAdd').onclick=()=>{const c=$('#subRows');c.appendChild(subRow());c.lastChild.querySelector('input').focus()};
 $('#subAddEdit').onclick=()=>{const c=$('#subRowsEdit');c.appendChild(subRow());c.lastChild.querySelector('input').focus()};
 

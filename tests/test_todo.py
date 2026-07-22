@@ -360,10 +360,21 @@ def test_report_counts(tmp_path):
 
 
 def test_write_lock_timeout(tmp_path):
+    """活进程持有的新鲜锁应阻塞写操作直至超时。"""
     tmp_path.mkdir(exist_ok=True)
-    (tmp_path / "todos.json.lock").write_text("12345")
+    (tmp_path / "todos.json.lock").write_text(str(os.getpid()))  # 本测试进程存活
     r = fail(tmp_path, "add", "会被锁住")
     assert "超时" in r.stderr and "todos.json.lock" in r.stderr
+
+
+def test_stale_lock_reaped(tmp_path):
+    """失主锁（持有进程已退出）应被回收，写操作正常成功，不再永久卡死。"""
+    tmp_path.mkdir(exist_ok=True)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()  # 该 PID 现已退出 → 属陈旧锁
+    (tmp_path / "todos.json.lock").write_text(str(dead.pid))
+    ok(tmp_path, "add", "抢占陈旧锁")
+    assert not (tmp_path / "todos.json.lock").exists()  # 用后释放
 
 
 def test_corrupted_db_not_rebuilt(tmp_path):

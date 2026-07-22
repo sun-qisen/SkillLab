@@ -92,11 +92,69 @@ def atomic_write(path, obj):
     os.replace(tmp, path)
 
 
+def pid_alive(pid):
+    """进程是否存活；跨平台，仅标准库。判不准时保守返回 True（宁可不抢锁）。"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False  # 进程不存在
+        try:
+            code = wintypes.DWORD()
+            if k.GetExitCodeProcess(h, ctypes.byref(code)):
+                return code.value == STILL_ACTIVE
+            return True
+        finally:
+            k.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # PermissionError 等：进程在但无权限，视为存活
+    return True
+
+
 class Lock:
-    """写锁：原子创建锁文件实现（不用 fcntl，保证 Windows 可用）。"""
+    """写锁：原子创建锁文件实现（不用 fcntl，保证 Windows 可用）。
+
+    进程被硬杀（SIGKILL / taskkill /F / 断电）时 __exit__ 不执行，锁文件会残留。
+    抢锁失败时据此判定失主并回收：锁内记录的 PID 已消失，或锁文件存在超过
+    STALE_SECONDS（写操作均为亚秒级），即视为陈旧锁——确认其间未被他人重建后
+    原子清除并重试。两条件互补：PID 死 → 立即回收；PID 被复用误判存活 → 由超时兜底。
+    """
+
+    STALE_SECONDS = 30
 
     def __init__(self, data_dir):
         self.path = data_dir / "todos.json.lock"
+
+    def _reap_if_stale(self):
+        """现有锁若属陈旧锁则清除。误删风险由「清除前复核 mtime 未变」规避。"""
+        try:
+            st = os.stat(self.path)
+        except FileNotFoundError:
+            return  # 锁已被释放，直接回去重试
+        try:
+            pid = int(self.path.read_text().strip() or 0)
+        except (OSError, ValueError):
+            pid = 0  # 读不出 PID（如刚创建尚未写入）→ 只靠超时判断
+        age = time.time() - st.st_mtime
+        stale = (pid and not pid_alive(pid)) or age >= self.STALE_SECONDS
+        if not stale:
+            return
+        try:
+            if os.stat(self.path).st_mtime != st.st_mtime:
+                return  # 其间被重建成新锁，不是我们判定的那把，放手
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
 
     def __enter__(self):
         deadline = time.monotonic() + LOCK_TIMEOUT
@@ -107,6 +165,7 @@ class Lock:
                 os.close(fd)
                 return self
             except FileExistsError:
+                self._reap_if_stale()
                 if time.monotonic() >= deadline:
                     raise TodoError(
                         f"获取写锁超时({LOCK_TIMEOUT:.0f}s)：{self.path} 被占用。"
