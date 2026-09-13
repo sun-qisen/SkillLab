@@ -70,6 +70,24 @@ def parse_date(s, field="due"):
         raise TodoError(f"{field} 必须是 YYYY-MM-DD 格式，收到: {s!r}")
 
 
+def parse_completed_at(s):
+    """解析完成时间覆盖值。纯日期默认当天 20:00（用户偏好）。
+
+    支持: YYYY-MM-DD → 当天 20:00；"YYYY-MM-DD HH:MM" → 指定时刻。
+    """
+    s = s.strip()
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").replace(hour=20, minute=0, second=0, microsecond=0)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise TodoError(
+            f"完成时间必须是 YYYY-MM-DD 或 'YYYY-MM-DD HH:MM' 格式（纯日期默认当天 20:00），收到: {s!r}"
+        )
+
+
 def resolve_data_dir(explicit):
     if explicit:
         d = Path(explicit)
@@ -323,12 +341,15 @@ def next_due(rule, from_date):
     raise TodoError(f"无法解析 recurrence: {rule!r}")
 
 
-def finalize_done(db, t, txn, lines, entries):
-    """把任务置为 done；若为循环任务则生成下一期。返回新任务或 None。"""
+def finalize_done(db, t, txn, lines, entries, completed_at=None):
+    """把任务置为 done；若为循环任务则生成下一期。返回新任务或 None。
+
+    completed_at: 可选 datetime，覆盖完成时间（用于补记实际完成日期）。
+    """
     before = snapshot(t)
     rule = t.get("recurrence")
     t["status"] = "done"
-    t["completed_at"] = now_iso()
+    t["completed_at"] = (completed_at or now_iso()).isoformat(timespec="seconds")
     for st in t.get("subtasks", []):
         st["status"] = "done"
     t["progress"] = 100
@@ -643,6 +664,11 @@ def cmd_update(ns, data_dir):
                 if not 0 <= ns.progress <= 100:
                     raise TodoError("--progress 必须在 0-100 之间")
                 t["progress"] = ns.progress
+            if ns.completed_at is not None:
+                if t["status"] != "done":
+                    raise TodoError("只能修改已完成任务的完成时间（当前状态不是 done）")
+                t["completed_at"] = parse_completed_at(ns.completed_at).isoformat(timespec="seconds")
+                explicit.append("completed_at")
             # 用户显式修改过的字段不再是"推断值"
             t["inferred"] = [f for f in t.get("inferred", []) if f not in explicit]
             spawned = None
@@ -671,6 +697,8 @@ def cmd_done(ns, data_dir):
         db = load_db(data_dir)
         t, st = get_task_or_die(db, ns.id)
         if st is not None:
+            if getattr(ns, "at", None):
+                raise TodoError("子任务不支持 --at（子任务没有完成时间字段）")
             if st["status"] == "done":
                 raise TodoError(f"子任务 {st['id']}「{st['title']}」已经是完成状态")
             before = snapshot(t)
@@ -687,7 +715,10 @@ def cmd_done(ns, data_dir):
         else:
             if t["status"] == "done":
                 raise TodoError(f"#{t['id']}「{t['title']}」已经是完成状态")
-            finalize_done(db, t, txn, lines, entries)
+            completed_at = parse_completed_at(ns.at) if getattr(ns, "at", None) else None
+            finalize_done(db, t, txn, lines, entries, completed_at=completed_at)
+            if completed_at is not None:
+                lines.append(f"  完成时间已记为 {t['completed_at']}")
         save_db(data_dir, db)
         journal_append(data_dir, entries)
     return {"task": t}, lines
@@ -913,11 +944,14 @@ def build_parser():
     u.add_argument("--tags")
     u.add_argument("--estimate", type=int)
     u.add_argument("--recurrence")
+    u.add_argument("--completed-at", dest="completed_at",
+                   help="修改已完成任务的完成时间，YYYY-MM-DD（默认当天 20:00）或 'YYYY-MM-DD HH:MM'")
     u.add_argument("--blocked-reason", dest="blocked_reason")
     u.set_defaults(fn=cmd_update)
 
     d = sub.add_parser("done", parents=[common], help="完成任务或子任务（12 或 12.1）")
     d.add_argument("id")
+    d.add_argument("--at", help="指定完成时间，YYYY-MM-DD（默认当天 20:00）或 'YYYY-MM-DD HH:MM'，用于补记")
     d.set_defaults(fn=cmd_done)
 
     st = sub.add_parser("subtask", help="子任务操作")
