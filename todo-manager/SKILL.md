@@ -89,10 +89,13 @@ todo.py list --view all       # 全部活跃任务（--include-done 连已完成
 
 ```
 todo.py done 12               # 完成任务（循环任务会自动生成下一期）
+todo.py done 12 --at 2026-09-07        # 补记完成时间（纯日期默认当天 20:00）
+todo.py done 12 --at "2026-09-07 15:30" # 或指定具体时刻
 todo.py done 12.1             # 完成子任务，父任务进度自动重算
 todo.py update 12 --due 2026-07-10 --priority P0
 todo.py update 12 --status blocked --blocked-reason "等设计稿"
 todo.py update 12 --status in_progress
+todo.py update 12 --completed-at 2026-09-07   # 修正已完成任务的完成时间
 todo.py subtask add 12 "确认收件人名单"
 ```
 
