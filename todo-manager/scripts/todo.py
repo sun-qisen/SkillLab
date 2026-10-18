@@ -348,8 +348,10 @@ def finalize_done(db, t, txn, lines, entries, completed_at=None):
     """
     before = snapshot(t)
     rule = t.get("recurrence")
+    completed_at = completed_at or current_now()
+    done_day = logical_day(completed_at)  # 补记时以实际完成日为准，而不是今天
     t["status"] = "done"
-    t["completed_at"] = (completed_at or now_iso()).isoformat(timespec="seconds")
+    t["completed_at"] = completed_at.isoformat(timespec="seconds")
     for st in t.get("subtasks", []):
         st["status"] = "done"
     t["progress"] = 100
@@ -362,9 +364,9 @@ def finalize_done(db, t, txn, lines, entries, completed_at=None):
 
     spawned = None
     if rule:
-        anchor = parse_date(t["due"]) if t.get("due") else logical_today()
+        anchor = parse_date(t["due"]) if t.get("due") else done_day
         nd = next_due(rule, anchor)
-        while nd <= logical_today():  # 拖延补做：逐期推进，保持原节拍
+        while nd <= done_day:  # 拖延补做：逐期推进，保持原节拍
             nd = next_due(rule, nd)
         nid_before = db["next_id"]
         spawned = {

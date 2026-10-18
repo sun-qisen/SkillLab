@@ -308,6 +308,23 @@ def test_recurrence_no_due_falls_back_to_completion_day(tmp_path):
     assert new["due"] == "2026-07-13"  # 从完成日（周六）推算下一个周一
 
 
+def test_recurrence_backfill_at_uses_completion_day(tmp_path):
+    ok(tmp_path, "add", "发版", "--recurrence", "weekly:sun",
+       "--due", "2026-10-04", now="2026-09-29T22:00:00")
+    # 10/19 凌晨补记 10/04 已完成：下一期应是 10/11，而不是按"今天"跳到 10/25
+    ok(tmp_path, "done", "1", "--at", "2026-10-04", now="2026-10-19T00:30:00")
+    new = next(t for t in read_db(tmp_path)["tasks"] if t["id"] == 2)
+    assert new["due"] == "2026-10-11"
+
+
+def test_recurrence_backfill_late_completion_rolls_forward(tmp_path):
+    ok(tmp_path, "add", "浇花", "--recurrence", "every:3:days",
+       "--due", "2026-07-01", now="2026-07-01T09:00:00")
+    ok(tmp_path, "done", "1", "--at", "2026-07-05", now="2026-07-12T15:00:00")
+    new = next(t for t in read_db(tmp_path)["tasks"] if t["id"] == 2)
+    assert new["due"] == "2026-07-07"  # 节拍 4/7：严格晚于实际完成日 7/5
+
+
 # ---------------------------------------------------------------- undo
 
 def test_undo_add_restores_next_id(tmp_path):
